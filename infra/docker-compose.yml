@@ -1,0 +1,51 @@
+# Local development dependencies for the exchange.
+# Brings up the three backing services the MVP relies on:
+#   - PostgreSQL   : accounts, orders, the double-entry ledger (ACID, source of truth)
+#   - Redis        : sessions, caching, rate limiting, ephemeral order-book snapshots
+#   - Redpanda     : Kafka-compatible ordered event log for the sequencer + replay
+#
+# Usage:  docker compose -f infra/docker-compose.yml up -d
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: bittech
+      POSTGRES_PASSWORD: bittech
+      POSTGRES_DB: bittech
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Schema migrations are applied on first boot in lexical order.
+      - ./db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bittech"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redpanda:
+    image: redpandadata/redpanda:latest
+    command:
+      - redpanda
+      - start
+      - --smp=1
+      - --overprovisioned
+      - --node-id=0
+      - --kafka-addr=PLAINTEXT://0.0.0.0:9092
+      - --advertise-kafka-addr=PLAINTEXT://localhost:9092
+    ports:
+      - "9092:9092"
+
+volumes:
+  pgdata:
