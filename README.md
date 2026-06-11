@@ -39,7 +39,8 @@ Redis (cache/sessions/rate-limit) · TimescaleDB (market data) · Next.js + Trad
 ```
 libs/money                         fixed-point integer money type (no floats)
 services/matching-engine/orderbook in-memory limit order book, price-time priority
-infra/db                           SQL migrations (double-entry ledger)
+services/account-service           signup/login, TOTP 2FA, sessions, API keys (HMAC)
+infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
 ```
 
@@ -51,12 +52,16 @@ go test ./...
 
 # Bring up local backing services.
 docker compose -f infra/docker-compose.yml up -d
+
+# Run the account service (in-memory store without DATABASE_URL).
+DATABASE_URL='postgres://bittech:bittech@127.0.0.1:5432/bittech' \
+  go run ./services/account-service/cmd/account-service
 ```
 
 ## Status / roadmap
 
 - [x] Phase 0 — Foundations: money type, ledger schema, order book, local infra
-- [ ] Phase 1 — Accounts & auth (signup, TOTP 2FA, API keys + HMAC, rate limiting)
+- [x] Phase 1 — Accounts & auth (signup, TOTP 2FA, sessions, API keys + HMAC signing)
 - [ ] Phase 2 — Matching engine service: sequencer + event sourcing + replay
 - [ ] Phase 3 — Ledger service: settlement, balance locking, reconciliation
 - [ ] Phase 4 — Market data & REST/WebSocket APIs (depth, trades, klines)
