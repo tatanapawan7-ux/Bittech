@@ -39,6 +39,7 @@ Redis (cache/sessions/rate-limit) · TimescaleDB (market data) · Next.js + Trad
 ```
 libs/money                         fixed-point integer money type (no floats)
 services/matching-engine/orderbook in-memory limit order book, price-time priority
+services/matching-engine/engine    event-sourced engine: WAL journal + replay recovery
 services/account-service           signup/login, TOTP 2FA, sessions, API keys (HMAC)
 infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
@@ -62,7 +63,8 @@ DATABASE_URL='postgres://bittech:bittech@127.0.0.1:5432/bittech' \
 
 - [x] Phase 0 — Foundations: money type, ledger schema, order book, local infra
 - [x] Phase 1 — Accounts & auth (signup, TOTP 2FA, sessions, API keys + HMAC signing)
-- [ ] Phase 2 — Matching engine service: sequencer + event sourcing + replay
+- [x] Phase 2 — Matching engine service: sequencer + write-ahead journal + crash-recovery
+      replay (file journal now; the Journal interface swaps in Redpanda for clustering)
 - [ ] Phase 3 — Ledger service: settlement, balance locking, reconciliation
 - [ ] Phase 4 — Market data & REST/WebSocket APIs (depth, trades, klines)
 - [ ] Phase 5 — Wallet/custody integration (Fireblocks/BitGo)
