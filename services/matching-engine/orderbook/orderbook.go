@@ -118,15 +118,18 @@ func (ob *OrderBook) PlaceMarket(id string, side Side, qty int64) ([]Trade, erro
 	return ob.match(o), nil
 }
 
-// Cancel removes a resting order from the book.
-func (ob *OrderBook) Cancel(id string) error {
+// Cancel removes a resting order from the book and returns a copy of it (so
+// callers can release the funds still reserved for the unfilled remainder).
+func (ob *OrderBook) Cancel(id string) (Order, error) {
 	o, ok := ob.live[id]
 	if !ok {
-		return ErrNotFound
+		return Order{}, ErrNotFound
 	}
 	o.side.remove(o)
 	delete(ob.live, id)
-	return nil
+	cp := *o
+	cp.elem, cp.side = nil, nil
+	return cp, nil
 }
 
 // BestBid returns the highest bid price and true, or false if there are no bids.

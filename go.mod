@@ -3,6 +3,7 @@ module github.com/tatanapawan7-ux/bittech
 go 1.25.0
 
 require (
+	github.com/coder/websocket v1.8.14
 	github.com/jackc/pgx/v5 v5.10.0
 	golang.org/x/crypto v0.53.0
 )

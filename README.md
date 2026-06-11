@@ -42,6 +42,8 @@ services/matching-engine/orderbook in-memory limit order book, price-time priori
 services/matching-engine/engine    event-sourced engine: WAL journal + replay recovery
 services/account-service           signup/login, TOTP 2FA, sessions, API keys (HMAC)
 services/ledger-service/ledger     double-entry postings, locking, trade settlement
+services/exchange                  trading API: orders, balances, depth, trades, WS feed
+services/exchange/cmd/exchange     single-binary backend (accounts+ledger+engine+API)
 infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
 ```
@@ -55,9 +57,21 @@ go test ./...
 # Bring up local backing services.
 docker compose -f infra/docker-compose.yml up -d
 
-# Run the account service (in-memory store without DATABASE_URL).
+# Run the whole exchange backend in one process (dev faucet enabled).
 DATABASE_URL='postgres://bittech:bittech@127.0.0.1:5432/bittech' \
-  go run ./services/account-service/cmd/account-service
+  DEV_FAUCET=1 go run ./services/exchange/cmd/exchange
+```
+
+Quick trade from the shell:
+
+```bash
+curl -X POST :8080/v1/signup -d '{"email":"me@example.com","password":"averysecurepw"}'
+TOKEN=$(curl -sX POST :8080/v1/login -d '{"email":"me@example.com","password":"averysecurepw"}' | jq -r .token)
+curl -X POST :8080/v1/dev/deposit -H "Authorization: Bearer $TOKEN" -d '{"asset":"USDT","amount":1000}'
+curl -X POST :8080/v1/orders -H "Authorization: Bearer $TOKEN" \
+  -d '{"symbol":"BTC-USDT","type":"limit","side":"buy","price":50,"qty":4}'
+curl ':8080/v1/depth?symbol=BTC-USDT'
+# live market feed: ws://localhost:8080/v1/ws?symbol=BTC-USDT
 ```
 
 ## Status / roadmap
@@ -68,7 +82,9 @@ DATABASE_URL='postgres://bittech:bittech@127.0.0.1:5432/bittech' \
       replay (file journal now; the Journal interface swaps in Redpanda for clustering)
 - [x] Phase 3 — Ledger service: settlement, balance locking, idempotent replay,
       invariant checks (consumer wiring to the engine event stream lands with Phase 4)
-- [ ] Phase 4 — Market data & REST/WebSocket APIs (depth, trades, klines)
+- [x] Phase 4 — Trading API & market data: authed order placement with ledger locking,
+      settlement + refunds, cancel, balances, depth/trades REST, WebSocket event feed
+      (klines/TimescaleDB and API-key HMAC auth on orders still pending)
 - [ ] Phase 5 — Wallet/custody integration (Fireblocks/BitGo)
 - [ ] Phase 6 — Trading frontend (Next.js + TradingView)
 - [ ] Phase 7 — Admin, observability, security & compliance hardening

@@ -101,13 +101,18 @@ func TestMarketOrderSweepsLevels(t *testing.T) {
 func TestCancelRemovesResting(t *testing.T) {
 	ob := New("BTC-USDT")
 	ob.PlaceLimit("ask1", Sell, 10, 100)
-	if err := ob.Cancel("ask1"); err != nil {
+	ob.PlaceLimit("bid1", Buy, 10, 30) // partial fill: 70 remains
+	o, err := ob.Cancel("ask1")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if o.Remaining != 70 || o.Price != 10 || o.Side != Sell {
+		t.Fatalf("cancel should report the unfilled remainder: %+v", o)
 	}
 	if _, ok := ob.BestAsk(); ok {
 		t.Fatal("ask should be gone after cancel")
 	}
-	if err := ob.Cancel("ask1"); err != ErrNotFound {
+	if _, err := ob.Cancel("ask1"); err != ErrNotFound {
 		t.Fatalf("expected ErrNotFound, got %v", err)
 	}
 }

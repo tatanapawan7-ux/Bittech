@@ -234,16 +234,24 @@ func (e *Engine) apply(seq uint64, cmd Command) []Event {
 
 	case CmdCancel:
 		owner, live := e.orders[cmd.OrderID]
-		if err := ob.Cancel(cmd.OrderID); err != nil {
+		// A cancel that names a user may only touch that user's order.
+		if cmd.UserID != 0 && live && owner.userID != cmd.UserID {
+			return []Event{e.reject(seq, cmd, "not order owner")}
+		}
+		cancelled, err := ob.Cancel(cmd.OrderID)
+		if err != nil {
 			return []Event{e.reject(seq, cmd, err.Error())}
 		}
 		delete(e.orders, cmd.OrderID)
+		// Price and Qty report the unfilled remainder so the ledger can
+		// release exactly the funds still reserved for this order.
 		ev := Event{
 			Type: EvtOrderCancelled, Seq: seq, Index: 0, Symbol: cmd.Symbol,
-			OrderID: cmd.OrderID,
+			OrderID: cmd.OrderID, Side: cancelled.Side,
+			Price: cancelled.Price, Qty: cancelled.Remaining,
 		}
 		if live {
-			ev.UserID, ev.Side = owner.userID, owner.side
+			ev.UserID = owner.userID
 		}
 		return []Event{ev}
 

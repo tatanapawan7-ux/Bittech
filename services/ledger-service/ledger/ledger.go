@@ -244,6 +244,33 @@ func (s *Service) SettleTrade(ctx context.Context, ev engine.Event) error {
 	})
 }
 
+// AccountBalance is one row of a user's balance sheet.
+type AccountBalance struct {
+	Asset   string `json:"asset"`
+	Kind    string `json:"kind"`
+	Balance int64  `json:"balance"`
+}
+
+// UserBalances lists a user's balances across all assets and kinds.
+func (s *Service) UserBalances(ctx context.Context, userID int64) ([]AccountBalance, error) {
+	rows, err := s.pool.Query(ctx, `
+		SELECT asset, kind, balance FROM accounts
+		WHERE user_id = $1 ORDER BY asset, kind`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AccountBalance
+	for rows.Next() {
+		var b AccountBalance
+		if err := rows.Scan(&b.Asset, &b.Kind, &b.Balance); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // CheckInvariants verifies the two global ledger invariants and returns an
 // error describing any violation. Run by the reconciliation job.
 func (s *Service) CheckInvariants(ctx context.Context) error {
