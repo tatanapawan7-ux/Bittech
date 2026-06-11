@@ -224,6 +224,7 @@ func (e *Engine) apply(seq uint64, cmd Command) []Event {
 			maker := e.orders[tr.MakerOrderID]
 			events = append(events, Event{
 				Type: EvtTrade, Seq: seq, Index: len(events), Symbol: cmd.Symbol,
+				Side:  cmd.Side, // the taker's side: tells settlement who bought
 				Price: tr.Price, Qty: tr.Quantity,
 				MakerOrderID: tr.MakerOrderID, TakerOrderID: tr.TakerOrderID,
 				MakerUserID: maker.userID, TakerUserID: cmd.UserID,
