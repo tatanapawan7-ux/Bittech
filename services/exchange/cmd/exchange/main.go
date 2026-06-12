@@ -14,17 +14,22 @@
 //	REDIS_ADDR    Redis address for distributed rate limiting (default in-memory).
 //	APIKEY_ENC_KEY 64 hex chars (32 bytes) to enable API-key signing; required for /v1/apikeys.
 //	RATE_LIMIT     Sustained requests/sec per client (default 20, burst 2x).
+//	BOOTSTRAP_ADMIN_EMAIL  If set, promotes this existing user to admin on boot.
 package main
 
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
@@ -34,13 +39,12 @@ import (
 	"github.com/tatanapawan7-ux/bittech/libs/ratelimit"
 	"github.com/tatanapawan7-ux/bittech/services/account-service/account"
 	"github.com/tatanapawan7-ux/bittech/services/account-service/auth"
-	accounthttp "github.com/tatanapawan7-ux/bittech/services/account-service/httpapi"
 	"github.com/tatanapawan7-ux/bittech/services/exchange"
+	"github.com/tatanapawan7-ux/bittech/services/exchange/app"
 	"github.com/tatanapawan7-ux/bittech/services/ledger-service/ledger"
 	"github.com/tatanapawan7-ux/bittech/services/matching-engine/engine"
 	"github.com/tatanapawan7-ux/bittech/services/wallet-service/custody"
 	"github.com/tatanapawan7-ux/bittech/services/wallet-service/wallet"
-	wallethttp "github.com/tatanapawan7-ux/bittech/services/wallet-service/wallethttp"
 )
 
 func main() {
@@ -57,6 +61,25 @@ func main() {
 		os.Exit(1)
 	}
 	defer pool.Close()
+
+	// Promote a bootstrap admin so the operator endpoints are reachable on a
+	// fresh deployment (the user must already exist via signup).
+	if email := os.Getenv("BOOTSTRAP_ADMIN_EMAIL"); email != "" {
+		tag, err := pool.Exec(context.Background(),
+			`UPDATE users SET is_admin = true WHERE email = $1`, strings.ToLower(email))
+		if err != nil {
+			log.Error("bootstrap admin", "err", err)
+		} else if tag.RowsAffected() == 0 {
+			log.Warn("bootstrap admin: no such user (sign up first)", "email", email)
+		} else {
+			log.Info("bootstrap admin promoted", "email", email)
+		}
+	}
+
+	// The engine and its goroutine are tied to a cancelable context so shutdown
+	// can stop accepting commands cleanly.
+	rootCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	// Engine with durable journal.
 	dir := envOr("JOURNAL_DIR", "./data")
@@ -78,7 +101,7 @@ func main() {
 		log.Error("recover engine", "err", err)
 		os.Exit(1)
 	}
-	go eng.Run(context.Background())
+	go eng.Run(rootCtx)
 	log.Info("engine recovered", "symbols", symbols)
 
 	// Services.
@@ -108,25 +131,34 @@ func main() {
 	// (Fireblocks/BitGo) is configured — swapping it is a one-line change here.
 	withdrawLimit := int64(100_000_000_000)
 	wal := wallet.New(pool, custody.NewMock(), led, withdrawLimit)
-	webhookSecret := envOr("CUSTODY_WEBHOOK_SECRET", "dev-webhook-secret")
 
-	// One mux: account + trading + wallet routes.
-	accountAPI := accounthttp.New(accounts, log)
-	mux := http.NewServeMux()
-	for _, route := range []string{"/v1/signup", "/v1/login", "/v1/me", "/v1/2fa/", "/v1/apikeys"} {
-		mux.Handle(route, accountAPI)
-	}
-	walletAPI := wallethttp.New(wal, accounts, log, webhookSecret)
-	for _, route := range []string{"/v1/wallet/", "/v1/admin/"} {
-		mux.Handle(route, walletAPI)
-	}
-	mux.Handle("/", exchange.NewServer(trading, eng, led, accounts, hub, log, faucet))
+	// Compose all routes through the shared composition root (see app.NewMux).
+	mux := app.NewMux(app.Deps{
+		Accounts: accounts, Wallet: wal, Trading: trading, Engine: eng,
+		Ledger: led, Hub: hub, Log: log, Faucet: faucet,
+		WebhookSecret: envOr("CUSTODY_WEBHOOK_SECRET", "dev-webhook-secret"),
+	})
 
 	// Observability + protection at the edge.
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(prometheus.NewGoCollector())
 	metrics := httpx.NewMetrics(reg)
 	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+
+	// Liveness vs readiness: /healthz is a cheap process check; /readyz verifies
+	// the database is reachable so a load balancer only routes once we can serve.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+		defer cancel()
+		if err := pool.Ping(ctx); err != nil {
+			http.Error(w, "not ready", http.StatusServiceUnavailable)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
 
 	// Rate limit per client. Redis makes the limit global across instances;
 	// without REDIS_ADDR it falls back to an in-process limiter.
@@ -151,11 +183,27 @@ func main() {
 	handler := metrics.Instrument(limited)
 
 	addr := envOr("LISTEN_ADDR", ":8080")
-	log.Info("exchange listening", "addr", addr)
-	if err := http.ListenAndServe(addr, handler); err != nil {
-		log.Error("server exited", "err", err)
-		os.Exit(1)
+	srv := &http.Server{Addr: addr, Handler: handler}
+
+	// Serve until a termination signal, then drain in-flight requests. The
+	// engine journal is fsync'd per command, so no trade is lost on shutdown.
+	go func() {
+		log.Info("exchange listening", "addr", addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error("server exited", "err", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-rootCtx.Done()
+	stop() // restore default signal handling so a second signal force-quits
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error("graceful shutdown failed", "err", err)
 	}
+	log.Info("stopped")
 }
 
 func envOr(key, def string) string {

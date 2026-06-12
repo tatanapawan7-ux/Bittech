@@ -68,7 +68,7 @@ func setup(t *testing.T) *fixture {
 			t.Fatalf("apply %s: %v", f, err)
 		}
 	}
-	mustExec(t, pool, `INSERT INTO assets (symbol, name, scale) VALUES ('BTC','Bitcoin',8), ('USDT','Tether',6)`)
+	mustExec(t, pool, `INSERT INTO assets (symbol, name, scale) VALUES ('BTC','Bitcoin',8), ('USDT','Tether',6) ON CONFLICT (symbol) DO NOTHING`)
 	mustExec(t, pool, `INSERT INTO users (email) VALUES ('u1@t.co'), ('u2@t.co')`)
 
 	led := ledger.New(pool)

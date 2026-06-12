@@ -62,7 +62,7 @@ func testService(t *testing.T) *Service {
 		}
 	}
 	// Test fixtures: two assets and two users (ledger refs users/assets).
-	mustExec(t, pool, `INSERT INTO assets (symbol, name, scale) VALUES ('BTC','Bitcoin',8), ('USDT','Tether',6)`)
+	mustExec(t, pool, `INSERT INTO assets (symbol, name, scale) VALUES ('BTC','Bitcoin',8), ('USDT','Tether',6) ON CONFLICT (symbol) DO NOTHING`)
 	mustExec(t, pool, `INSERT INTO users (email) VALUES ('buyer@t.co'), ('seller@t.co')`)
 	return New(pool)
 }
