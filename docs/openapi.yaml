@@ -1,0 +1,512 @@
+openapi: 3.0.3
+info:
+  title: Bittech Exchange API
+  version: "0.1.0"
+  description: |
+    Public API for the Bittech crypto-to-crypto spot exchange.
+
+    **Authentication.** Most endpoints accept either:
+      - a session bearer token (`Authorization: Bearer <token>` from `/v1/login`), or
+      - an HMAC-signed API key for programmatic clients, via headers
+        `X-API-Key`, `X-API-Timestamp` (unix millis), and `X-API-Signature`
+        (hex HMAC-SHA256 over `"<ts>\n<METHOD>\n<path>\n<body>"`). The timestamp
+        must be within 30s of server time.
+
+    **Amounts** are integers in each asset's smallest unit (no floats). For a
+    limit order, `price` is quote units per one base unit, so the notional is
+    `price * qty`.
+
+    **Market data** also streams over a WebSocket at `GET /v1/ws?symbol=...`,
+    which pushes JSON arrays of engine events (order_accepted, trade,
+    order_cancelled). This is not modelled below as OpenAPI does not describe
+    WebSockets.
+servers:
+  - url: http://localhost:8080
+    description: Local dev (or via the web UI's /api proxy)
+
+tags:
+  - name: Account
+  - name: Trading
+  - name: Market Data
+  - name: Wallet
+  - name: Admin
+  - name: Ops
+
+paths:
+  /v1/signup:
+    post:
+      tags: [Account]
+      summary: Register a new user
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string, minLength: 10 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: integer }
+                  email: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+
+  /v1/login:
+    post:
+      tags: [Account]
+      summary: Log in and obtain a session token
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string }
+                password: { type: string }
+                totp_code: { type: string, description: Required if 2FA is enabled }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  token: { type: string }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/me:
+    get:
+      tags: [Account]
+      summary: Current user
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id: { type: integer }
+                  email: { type: string }
+                  totp_enabled: { type: boolean }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/2fa/setup:
+    post:
+      tags: [Account]
+      summary: Begin TOTP enrollment (returns secret + otpauth URI)
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  secret: { type: string }
+                  uri: { type: string }
+
+  /v1/2fa/confirm:
+    post:
+      tags: [Account]
+      summary: Confirm and enable TOTP
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string }
+      responses:
+        "200": { description: Enabled }
+        "401": { $ref: "#/components/responses/Error" }
+
+  /v1/apikeys:
+    post:
+      tags: [Account]
+      summary: Create an API key (secret returned once)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key_id: { type: string }
+                  secret: { type: string }
+
+  /v1/orders:
+    post:
+      tags: [Trading]
+      summary: Place an order
+      description: Funds are locked before matching. Market buys are not yet supported.
+      security: [{ bearerAuth: [] }, { apiKeyAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, type, side, qty]
+              properties:
+                symbol: { type: string, example: BTC-USDT }
+                type: { type: string, enum: [limit, market] }
+                side: { type: string, enum: [buy, sell] }
+                price: { type: integer, description: Required for limit orders }
+                qty: { type: integer }
+      responses:
+        "201":
+          description: Accepted (with resulting engine events)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "422": { description: Insufficient funds, $ref: "#/components/responses/Error" }
+
+  /v1/orders/cancel:
+    post:
+      tags: [Trading]
+      summary: Cancel a resting order
+      security: [{ bearerAuth: [] }, { apiKeyAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [symbol, order_id]
+              properties:
+                symbol: { type: string }
+                order_id: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  events:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+
+  /v1/balances:
+    get:
+      tags: [Trading]
+      summary: User balances (main + locked per asset)
+      security: [{ bearerAuth: [] }, { apiKeyAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  balances:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        asset: { type: string }
+                        kind: { type: string, enum: [main, locked] }
+                        balance: { type: integer }
+
+  /v1/depth:
+    get:
+      tags: [Market Data]
+      summary: Order-book snapshot
+      parameters:
+        - { name: symbol, in: query, required: true, schema: { type: string } }
+        - { name: levels, in: query, schema: { type: integer, default: 20 } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  bids: { type: array, items: { $ref: "#/components/schemas/Level" } }
+                  asks: { type: array, items: { $ref: "#/components/schemas/Level" } }
+
+  /v1/trades:
+    get:
+      tags: [Market Data]
+      summary: Recent trades
+      parameters:
+        - { name: symbol, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  trades:
+                    type: array
+                    items: { $ref: "#/components/schemas/Event" }
+
+  /v1/wallet/address:
+    get:
+      tags: [Wallet]
+      summary: Get (or create) a deposit address
+      security: [{ bearerAuth: [] }]
+      parameters:
+        - { name: asset, in: query, required: true, schema: { type: string } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  asset: { type: string }
+                  address: { type: string }
+
+  /v1/wallet/allowlist:
+    post:
+      tags: [Wallet]
+      summary: Add a withdrawal destination (requires fresh TOTP)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset, address, totp_code]
+              properties:
+                asset: { type: string }
+                address: { type: string }
+                label: { type: string }
+                totp_code: { type: string }
+      responses:
+        "200": { description: OK }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/wallet/withdraw:
+    post:
+      tags: [Wallet]
+      summary: Request a withdrawal (allowlisted address, TOTP, locks funds)
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [asset, address, amount, totp_code]
+              properties:
+                asset: { type: string }
+                address: { type: string }
+                amount: { type: integer }
+                totp_code: { type: string }
+      responses:
+        "201":
+          description: Requested
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Withdrawal" }
+        "400": { $ref: "#/components/responses/Error" }
+        "403": { description: Not allowlisted / 2FA, $ref: "#/components/responses/Error" }
+
+  /v1/admin/withdrawals:
+    get:
+      tags: [Admin]
+      summary: List pending withdrawals
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  withdrawals:
+                    type: array
+                    items: { $ref: "#/components/schemas/Withdrawal" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /v1/admin/withdrawals/approve:
+    post:
+      tags: [Admin]
+      summary: Approve and broadcast a withdrawal
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [id], properties: { id: { type: integer } } }
+      responses:
+        "200":
+          description: Broadcast
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Withdrawal" }
+
+  /v1/admin/withdrawals/reject:
+    post:
+      tags: [Admin]
+      summary: Reject a withdrawal and return funds
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [id], properties: { id: { type: integer } } }
+      responses:
+        "200":
+          description: Rejected
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Withdrawal" }
+
+  /v1/admin/reconcile:
+    get:
+      tags: [Admin]
+      summary: Run ledger invariant checks
+      security: [{ bearerAuth: [] }]
+      responses:
+        "200":
+          description: Result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ok: { type: boolean }
+                  violation: { type: string }
+
+  /v1/admin/halt:
+    post:
+      tags: [Admin]
+      summary: Pause new orders for a symbol
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [symbol], properties: { symbol: { type: string } } }
+      responses:
+        "200": { description: OK }
+
+  /v1/admin/resume:
+    post:
+      tags: [Admin]
+      summary: Resume orders for a symbol
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [symbol], properties: { symbol: { type: string } } }
+      responses:
+        "200": { description: OK }
+
+  /healthz:
+    get:
+      tags: [Ops]
+      summary: Liveness probe
+      responses: { "200": { description: OK } }
+
+  /readyz:
+    get:
+      tags: [Ops]
+      summary: Readiness probe (checks the database)
+      responses:
+        "200": { description: Ready }
+        "503": { description: Not ready }
+
+  /metrics:
+    get:
+      tags: [Ops]
+      summary: Prometheus metrics
+      responses: { "200": { description: Prometheus text exposition } }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+    apiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: Also requires X-API-Timestamp and X-API-Signature (HMAC-SHA256).
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error: { type: string }
+  schemas:
+    Level:
+      type: object
+      properties:
+        price: { type: integer }
+        quantity: { type: integer }
+    Event:
+      type: object
+      description: An engine event. Fields present depend on `type`.
+      properties:
+        type:
+          type: string
+          enum: [order_accepted, order_rejected, order_cancelled, trade]
+        seq: { type: integer }
+        symbol: { type: string }
+        order_id: { type: string }
+        price: { type: integer }
+        qty: { type: integer }
+        side: { type: integer, description: "0 = buy, 1 = sell" }
+        maker_order_id: { type: string }
+        taker_order_id: { type: string }
+        reason: { type: string }
+    Withdrawal:
+      type: object
+      properties:
+        id: { type: integer }
+        user_id: { type: integer }
+        asset: { type: string }
+        amount: { type: integer }
+        address: { type: string }
+        status: { type: string, enum: [requested, broadcast, rejected] }
+        tx_hash: { type: string }

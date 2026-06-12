@@ -48,22 +48,27 @@ services/exchange/cmd/exchange     single-binary backend (accounts+ledger+engine
 libs/ratelimit                     token-bucket rate limiter (Redis + in-memory)
 libs/httpx                         edge middleware: Prometheus metrics + rate limiting
 web                                Next.js trading UI (order book, chart, order form, WS)
+docs/openapi.yaml                  OpenAPI 3.0 spec for the public REST API
 infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
 ```
 
 ## Develop
 
+The whole stack (backend + web UI + Postgres + Redis) in one command:
+
 ```bash
-# Run the test suite (money + order book).
-go test ./...
+make demo                 # docker compose up --build  ->  UI on :3000, API on :8080
+```
 
-# Bring up local backing services.
-docker compose -f infra/docker-compose.yml up -d
+Or piecewise (`make help` lists everything):
 
-# Run the whole exchange backend in one process (dev faucet enabled).
-DATABASE_URL='postgres://bittech:bittech@127.0.0.1:5432/bittech' \
-  DEV_FAUCET=1 go run ./services/exchange/cmd/exchange
+```bash
+make services             # start Postgres + Redis + Redpanda (Docker)
+make migrate              # apply all SQL migrations (incl. seeded assets)
+make test                 # full Go test suite (needs Postgres + Redis)
+make run                  # run the backend (dev faucet on)
+make web-install web-dev  # run the Next.js UI on :3000
 ```
 
 Quick trade from the shell:
