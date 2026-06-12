@@ -44,6 +44,7 @@ type User struct {
 	TOTPSecret   string
 	TOTPEnabled  bool
 	Status       string
+	IsAdmin      bool
 }
 
 // APIKey is a persisted programmatic-trading key (secret stored as hash only).
@@ -161,6 +162,24 @@ func (s *Service) SetupTOTP(ctx context.Context, userID int64) (secret, uri stri
 		return "", "", err
 	}
 	return secret, auth.TOTPProvisioningURI(secret, u.Email, "Bittech"), nil
+}
+
+// RequireTOTP performs step-up verification for sensitive actions (withdrawals,
+// allowlist changes). It returns nil only when the user has 2FA enabled and the
+// supplied code is valid, so callers can hard-fail actions for accounts without
+// 2FA. Returns ErrTOTPRequired when 2FA is not enabled on the account.
+func (s *Service) RequireTOTP(ctx context.Context, userID int64, code string) error {
+	u, err := s.store.UserByID(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if !u.TOTPEnabled {
+		return ErrTOTPRequired
+	}
+	if !auth.VerifyTOTP(u.TOTPSecret, code, s.now()) {
+		return ErrInvalidCredentials
+	}
+	return nil
 }
 
 // ConfirmTOTP enables 2FA after the user proves possession of the secret by

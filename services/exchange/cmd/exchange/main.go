@@ -27,6 +27,9 @@ import (
 	"github.com/tatanapawan7-ux/bittech/services/exchange"
 	"github.com/tatanapawan7-ux/bittech/services/ledger-service/ledger"
 	"github.com/tatanapawan7-ux/bittech/services/matching-engine/engine"
+	"github.com/tatanapawan7-ux/bittech/services/wallet-service/custody"
+	"github.com/tatanapawan7-ux/bittech/services/wallet-service/wallet"
+	wallethttp "github.com/tatanapawan7-ux/bittech/services/wallet-service/wallethttp"
 )
 
 func main() {
@@ -76,11 +79,21 @@ func main() {
 		log.Warn("dev faucet ENABLED — play-money deposits are open")
 	}
 
-	// One mux: account routes + trading routes.
+	// Wallet/custody: the mock provider stands in until a real custody vendor
+	// (Fireblocks/BitGo) is configured — swapping it is a one-line change here.
+	withdrawLimit := int64(100_000_000_000)
+	wal := wallet.New(pool, custody.NewMock(), led, withdrawLimit)
+	webhookSecret := envOr("CUSTODY_WEBHOOK_SECRET", "dev-webhook-secret")
+
+	// One mux: account + trading + wallet routes.
 	accountAPI := accounthttp.New(accounts, log)
 	mux := http.NewServeMux()
 	for _, route := range []string{"/v1/signup", "/v1/login", "/v1/me", "/v1/2fa/", "/v1/apikeys"} {
 		mux.Handle(route, accountAPI)
+	}
+	walletAPI := wallethttp.New(wal, accounts, log, webhookSecret)
+	for _, route := range []string{"/v1/wallet/", "/v1/admin/"} {
+		mux.Handle(route, walletAPI)
 	}
 	mux.Handle("/", exchange.NewServer(trading, eng, led, accounts, hub, log, faucet))
 

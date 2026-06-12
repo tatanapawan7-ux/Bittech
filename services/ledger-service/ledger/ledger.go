@@ -172,6 +172,28 @@ func (s *Service) Unlock(ctx context.Context, userID int64, asset string, amount
 	return s.transfer(ctx, "unlock", idempotencyKey, userID, asset, KindLocked, KindMain, amount)
 }
 
+// SettleWithdrawal removes locked funds from the books once a withdrawal is
+// broadcast on-chain: user locked -> system account (the external world). The
+// funds are gone from the exchange's liabilities, which keeps the per-asset
+// conservation invariant intact.
+func (s *Service) SettleWithdrawal(ctx context.Context, userID int64, asset string, amount int64, idempotencyKey string) error {
+	if amount <= 0 {
+		return fmt.Errorf("%w: non-positive withdrawal", ErrUnbalanced)
+	}
+	locked, err := s.UserAccount(ctx, userID, asset, KindLocked)
+	if err != nil {
+		return err
+	}
+	sys, err := s.SystemAccount(ctx, asset)
+	if err != nil {
+		return err
+	}
+	return s.Post(ctx, "withdrawal", idempotencyKey, []Entry{
+		{AccountID: locked, Asset: asset, Amount: -amount},
+		{AccountID: sys, Asset: asset, Amount: +amount},
+	})
+}
+
 func (s *Service) transfer(ctx context.Context, kind, key string, userID int64, asset, fromKind, toKind string, amount int64) error {
 	if amount <= 0 {
 		return fmt.Errorf("%w: non-positive transfer", ErrUnbalanced)

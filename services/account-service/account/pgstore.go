@@ -35,19 +35,19 @@ func (p *PGStore) CreateUser(ctx context.Context, email, passwordHash string) (*
 
 func (p *PGStore) UserByEmail(ctx context.Context, email string) (*User, error) {
 	return p.scanUser(p.pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, totp_secret, totp_enabled, status
+		`SELECT id, email, password_hash, totp_secret, totp_enabled, status, is_admin
 		 FROM users WHERE email = $1`, email))
 }
 
 func (p *PGStore) UserByID(ctx context.Context, id int64) (*User, error) {
 	return p.scanUser(p.pool.QueryRow(ctx,
-		`SELECT id, email, password_hash, totp_secret, totp_enabled, status
+		`SELECT id, email, password_hash, totp_secret, totp_enabled, status, is_admin
 		 FROM users WHERE id = $1`, id))
 }
 
 func (p *PGStore) scanUser(row pgx.Row) (*User, error) {
 	var u User
-	err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Status)
+	err := row.Scan(&u.ID, &u.Email, &u.PasswordHash, &u.TOTPSecret, &u.TOTPEnabled, &u.Status, &u.IsAdmin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

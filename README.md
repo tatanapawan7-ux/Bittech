@@ -42,6 +42,7 @@ services/matching-engine/orderbook in-memory limit order book, price-time priori
 services/matching-engine/engine    event-sourced engine: WAL journal + replay recovery
 services/account-service           signup/login, TOTP 2FA, sessions, API keys (HMAC)
 services/ledger-service/ledger     double-entry postings, locking, trade settlement
+services/wallet-service            deposits, withdrawals (2FA+allowlist+limits), custody seam
 services/exchange                  trading API: orders, balances, depth, trades, WS feed
 services/exchange/cmd/exchange     single-binary backend (accounts+ledger+engine+API)
 infra/db                           SQL migrations (double-entry ledger, auth)
@@ -85,6 +86,8 @@ curl ':8080/v1/depth?symbol=BTC-USDT'
 - [x] Phase 4 — Trading API & market data: authed order placement with ledger locking,
       settlement + refunds, cancel, balances, depth/trades REST, WebSocket event feed
       (klines/TimescaleDB and API-key HMAC auth on orders still pending)
-- [ ] Phase 5 — Wallet/custody integration (Fireblocks/BitGo)
+- [x] Phase 5 — Wallet/custody: deposit addresses, confirmation-gated crediting,
+      withdrawal flow (2FA + allowlist + limit + operator approval) behind a Custody
+      interface (mock provider; swap in Fireblocks/BitGo by implementing one interface)
 - [ ] Phase 6 — Trading frontend (Next.js + TradingView)
 - [ ] Phase 7 — Admin, observability, security & compliance hardening
