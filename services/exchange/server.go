@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -32,21 +33,27 @@ import (
 // Account endpoints (/v1/signup, /v1/login, ...) are mounted by the composing
 // binary alongside this server.
 type Server struct {
-	trading  *Trading
-	eng      *engine.Engine
-	ledger   *ledger.Service
-	accounts *account.Service
-	hub      *Hub
-	mux      *http.ServeMux
-	log      *slog.Logger
-	faucet   bool
+	trading   *Trading
+	eng       *engine.Engine
+	ledger    *ledger.Service
+	accounts  *account.Service
+	hub       *Hub
+	mux       *http.ServeMux
+	log       *slog.Logger
+	faucet    bool
+	wsOrigins []string // allowed WebSocket Origin hosts; empty = same-origin only
 }
 
-// NewServer wires the trading API routes.
+// NewServer wires the trading API routes. The WebSocket feed accepts cross-origin
+// connections from the hosts in ALLOWED_WS_ORIGINS (comma-separated), which is
+// how a separately-served frontend (e.g. Next.js on :3000) is permitted in dev.
 func NewServer(trading *Trading, eng *engine.Engine, led *ledger.Service, accounts *account.Service, hub *Hub, log *slog.Logger, faucet bool) *Server {
 	s := &Server{
 		trading: trading, eng: eng, ledger: led, accounts: accounts,
 		hub: hub, mux: http.NewServeMux(), log: log, faucet: faucet,
+	}
+	if v := os.Getenv("ALLOWED_WS_ORIGINS"); v != "" {
+		s.wsOrigins = strings.Split(v, ",")
 	}
 	s.mux.HandleFunc("POST /v1/orders", s.authed(s.handlePlaceOrder))
 	s.mux.HandleFunc("POST /v1/orders/cancel", s.authed(s.handleCancelOrder))
@@ -233,7 +240,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "symbol required")
 		return
 	}
-	conn, err := websocket.Accept(w, r, nil)
+	var opts *websocket.AcceptOptions
+	if len(s.wsOrigins) > 0 {
+		opts = &websocket.AcceptOptions{OriginPatterns: s.wsOrigins}
+	}
+	conn, err := websocket.Accept(w, r, opts)
 	if err != nil {
 		return
 	}
