@@ -11,18 +11,29 @@
 //	JOURNAL_DIR   Engine journal directory (default "./data").
 //	LISTEN_ADDR   HTTP listen address (default ":8080").
 //	DEV_FAUCET    "1" enables POST /v1/dev/deposit (play money; never in prod).
+//	REDIS_ADDR    Redis address for distributed rate limiting (default in-memory).
+//	APIKEY_ENC_KEY 64 hex chars (32 bytes) to enable API-key signing; required for /v1/apikeys.
+//	RATE_LIMIT     Sustained requests/sec per client (default 20, burst 2x).
 package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/redis/go-redis/v9"
+	"github.com/tatanapawan7-ux/bittech/libs/httpx"
+	"github.com/tatanapawan7-ux/bittech/libs/ratelimit"
 	"github.com/tatanapawan7-ux/bittech/services/account-service/account"
+	"github.com/tatanapawan7-ux/bittech/services/account-service/auth"
 	accounthttp "github.com/tatanapawan7-ux/bittech/services/account-service/httpapi"
 	"github.com/tatanapawan7-ux/bittech/services/exchange"
 	"github.com/tatanapawan7-ux/bittech/services/ledger-service/ledger"
@@ -72,6 +83,20 @@ func main() {
 
 	// Services.
 	accounts := account.NewService(account.NewPGStore(pool))
+	if hexKey := os.Getenv("APIKEY_ENC_KEY"); hexKey != "" {
+		key, err := hex.DecodeString(hexKey)
+		if err != nil {
+			log.Error("APIKEY_ENC_KEY must be hex", "err", err)
+			os.Exit(1)
+		}
+		cipher, err := auth.NewCipher(key)
+		if err != nil {
+			log.Error("APIKEY_ENC_KEY invalid", "err", err)
+			os.Exit(1)
+		}
+		accounts.WithCipher(cipher)
+		log.Info("API-key signing enabled")
+	}
 	led := ledger.New(pool)
 	trading := exchange.NewTrading(eng, led)
 	faucet := os.Getenv("DEV_FAUCET") == "1"
@@ -97,9 +122,37 @@ func main() {
 	}
 	mux.Handle("/", exchange.NewServer(trading, eng, led, accounts, hub, log, faucet))
 
+	// Observability + protection at the edge.
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(prometheus.NewGoCollector())
+	metrics := httpx.NewMetrics(reg)
+	mux.Handle("GET /metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+
+	// Rate limit per client. Redis makes the limit global across instances;
+	// without REDIS_ADDR it falls back to an in-process limiter.
+	rate := 20.0
+	if v := os.Getenv("RATE_LIMIT"); v != "" {
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			rate = f
+		}
+	}
+	cfg := ratelimit.Config{Rate: rate, Burst: rate * 2}
+	var limiter ratelimit.Limiter
+	if addr := os.Getenv("REDIS_ADDR"); addr != "" {
+		limiter = ratelimit.NewRedis(redis.NewClient(&redis.Options{Addr: addr}), cfg, "rl")
+		log.Info("rate limiting via redis", "addr", addr, "rate", rate)
+	} else {
+		limiter = ratelimit.NewMemory(cfg)
+		log.Info("rate limiting in-memory", "rate", rate)
+	}
+
+	// /metrics is exempt from rate limiting so scrapers are never throttled.
+	limited := httpx.RateLimit(limiter, httpx.ClientIP, metrics.MarkLimited())(mux)
+	handler := metrics.Instrument(limited)
+
 	addr := envOr("LISTEN_ADDR", ":8080")
 	log.Info("exchange listening", "addr", addr)
-	if err := http.ListenAndServe(addr, mux); err != nil {
+	if err := http.ListenAndServe(addr, handler); err != nil {
 		log.Error("server exited", "err", err)
 		os.Exit(1)
 	}

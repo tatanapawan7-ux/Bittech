@@ -47,11 +47,14 @@ type User struct {
 	IsAdmin      bool
 }
 
-// APIKey is a persisted programmatic-trading key (secret stored as hash only).
+// APIKey is a persisted programmatic-trading key. The secret is stored both as
+// a hash (audit/lookup) and encrypted (SecretEnc) so HMAC signatures can be
+// verified.
 type APIKey struct {
 	KeyID      string
 	UserID     int64
 	SecretHash string
+	SecretEnc  string
 	Label      string
 	Disabled   bool
 }
@@ -74,17 +77,26 @@ type Store interface {
 	DeleteSession(ctx context.Context, tokenHash string) error
 	CreateAPIKey(ctx context.Context, k APIKey) error
 	APIKeysByUser(ctx context.Context, userID int64) ([]APIKey, error)
+	APIKeyByID(ctx context.Context, keyID string) (*APIKey, error)
 }
 
 // Service implements the account business logic on top of a Store.
 type Service struct {
-	store Store
-	now   func() time.Time // injected for tests
+	store  Store
+	now    func() time.Time // injected for tests
+	cipher *auth.Cipher     // encrypts API-key secrets; nil disables API keys
 }
 
 // NewService creates a Service backed by the given store.
 func NewService(store Store) *Service {
 	return &Service{store: store, now: time.Now}
+}
+
+// WithCipher sets the cipher used to encrypt/decrypt API-key signing secrets.
+// Without it, CreateAPIKey and API-key verification are unavailable.
+func (s *Service) WithCipher(c *auth.Cipher) *Service {
+	s.cipher = c
+	return s
 }
 
 // Signup registers a new user.
@@ -195,16 +207,48 @@ func (s *Service) ConfirmTOTP(ctx context.Context, userID int64, code string) er
 	return s.store.SetTOTP(ctx, userID, u.TOTPSecret, true)
 }
 
-// CreateAPIKey mints a programmatic-trading key. The secret is returned once
-// and never persisted in plaintext.
+// ErrAPIKeysDisabled is returned when API-key operations are attempted without
+// a configured cipher.
+var ErrAPIKeysDisabled = errors.New("account: API keys are not enabled (no cipher configured)")
+
+// CreateAPIKey mints a programmatic-trading key. The secret is returned once;
+// it is persisted only encrypted (and hashed for audit).
 func (s *Service) CreateAPIKey(ctx context.Context, userID int64, label string) (keyID, secret string, err error) {
+	if s.cipher == nil {
+		return "", "", ErrAPIKeysDisabled
+	}
 	keyID, secret, secretHash, err := auth.NewAPIKey()
 	if err != nil {
 		return "", "", err
 	}
-	k := APIKey{KeyID: keyID, UserID: userID, SecretHash: secretHash, Label: label}
+	enc, err := s.cipher.Encrypt(secret)
+	if err != nil {
+		return "", "", err
+	}
+	k := APIKey{KeyID: keyID, UserID: userID, SecretHash: secretHash, SecretEnc: enc, Label: label}
 	if err := s.store.CreateAPIKey(ctx, k); err != nil {
 		return "", "", err
 	}
 	return keyID, secret, nil
+}
+
+// VerifyAPIRequest authenticates a signed programmatic request: it looks up the
+// key, decrypts its secret, and checks the HMAC signature and freshness window.
+// On success it returns the owning user (Binance-style API authentication).
+func (s *Service) VerifyAPIRequest(ctx context.Context, keyID, signature string, tsMillis int64, method, path, body string) (*User, error) {
+	if s.cipher == nil {
+		return nil, ErrAPIKeysDisabled
+	}
+	k, err := s.store.APIKeyByID(ctx, keyID)
+	if err != nil || k.Disabled {
+		return nil, ErrInvalidCredentials
+	}
+	secret, err := s.cipher.Decrypt(k.SecretEnc)
+	if err != nil {
+		return nil, ErrInvalidCredentials
+	}
+	if !auth.VerifyRequest(secret, signature, tsMillis, method, path, body, s.now()) {
+		return nil, ErrInvalidCredentials
+	}
+	return s.store.UserByID(ctx, k.UserID)
 }

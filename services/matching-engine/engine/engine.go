@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/tatanapawan7-ux/bittech/services/matching-engine/orderbook"
 )
@@ -95,6 +96,8 @@ type Sink func(events []Event)
 type Engine struct {
 	books   map[string]*orderbook.OrderBook
 	orders  map[string]ownedOrder // live order id -> attribution
+	halted  map[string]bool       // symbols where new orders are paused
+	haltMu  sync.RWMutex          // guards halted (written by control plane)
 	journal Journal
 	sink    Sink
 	cmdCh   chan submitReq
@@ -126,6 +129,7 @@ func New(symbols []string, journal Journal, sink Sink) (*Engine, error) {
 	e := &Engine{
 		books:   make(map[string]*orderbook.OrderBook, len(symbols)),
 		orders:  make(map[string]ownedOrder),
+		halted:  make(map[string]bool),
 		journal: journal,
 		sink:    sink,
 		cmdCh:   make(chan submitReq, 1024),
@@ -150,6 +154,18 @@ func (e *Engine) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case req := <-e.cmdCh:
+			// Admission control: when a symbol is halted, reject NEW orders
+			// before they are journaled (cancels are always allowed so users
+			// can pull resting orders). Because halted orders never enter the
+			// journal, replay remains deterministic without journaling halts.
+			if req.cmd.Type != CmdCancel && e.IsHalted(req.cmd.Symbol) {
+				req.reply <- submitResp{events: []Event{{
+					Type: EvtOrderRejected, Symbol: req.cmd.Symbol,
+					OrderID: req.cmd.OrderID, UserID: req.cmd.UserID,
+					Reason: "trading halted",
+				}}}
+				continue
+			}
 			seq, err := e.journal.Append(req.cmd) // write-ahead: durable before applied
 			if err != nil {
 				req.reply <- submitResp{err: err}
@@ -179,6 +195,28 @@ func (e *Engine) Submit(ctx context.Context, cmd Command) ([]Event, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// Halt pauses acceptance of new orders for a symbol (control-plane action,
+// e.g. during incidents). Resting orders and cancels are unaffected.
+func (e *Engine) Halt(symbol string) {
+	e.haltMu.Lock()
+	e.halted[symbol] = true
+	e.haltMu.Unlock()
+}
+
+// Resume re-enables order acceptance for a symbol.
+func (e *Engine) Resume(symbol string) {
+	e.haltMu.Lock()
+	delete(e.halted, symbol)
+	e.haltMu.Unlock()
+}
+
+// IsHalted reports whether new orders are paused for a symbol.
+func (e *Engine) IsHalted(symbol string) bool {
+	e.haltMu.RLock()
+	defer e.haltMu.RUnlock()
+	return e.halted[symbol]
 }
 
 // Depth exposes an order-book snapshot for market data. It must only be called

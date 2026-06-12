@@ -51,6 +51,19 @@ func (m *MemStore) UserByEmail(_ context.Context, email string) (*User, error) {
 	return &cp, nil
 }
 
+// SetAdmin grants the admin role to a user. Intended for bootstrap/dev: a
+// production deployment promotes operators through an audited path.
+func (m *MemStore) SetAdmin(userID int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	u, ok := m.users[userID]
+	if !ok {
+		return ErrNotFound
+	}
+	u.IsAdmin = true
+	return nil
+}
+
 func (m *MemStore) UserByID(_ context.Context, id int64) (*User, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -114,4 +127,14 @@ func (m *MemStore) APIKeysByUser(_ context.Context, userID int64) ([]APIKey, err
 		}
 	}
 	return out, nil
+}
+
+func (m *MemStore) APIKeyByID(_ context.Context, keyID string) (*APIKey, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	k, ok := m.apiKeys[keyID]
+	if !ok {
+		return nil, ErrNotFound
+	}
+	return &k, nil
 }

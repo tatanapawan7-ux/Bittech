@@ -189,6 +189,52 @@ func e2Submit(t *testing.T, e *Engine, cmd Command) ([]Event, error) {
 	return e.Submit(ctx, cmd)
 }
 
+func TestHaltBlocksNewOrdersButAllowsCancels(t *testing.T) {
+	j := &MemJournal{}
+	e, stop := run(t, j, nil)
+	defer stop()
+	ctx := context.Background()
+
+	// Rest an order, then halt the symbol.
+	evs, _ := e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "resting", UserID: 1, Side: orderbook.Buy, Price: 100, Qty: 5})
+	restingID := evs[0].OrderID
+	e.Halt(sym)
+	if !e.IsHalted(sym) {
+		t.Fatal("symbol should be halted")
+	}
+
+	// New orders are rejected and NOT journaled.
+	evs, err := e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "blocked", UserID: 2, Side: orderbook.Sell, Price: 100, Qty: 5})
+	if err != nil || evs[0].Type != EvtOrderRejected || evs[0].Reason != "trading halted" {
+		t.Fatalf("halted order: %v %+v", err, evs)
+	}
+
+	// Cancels still work during a halt.
+	evs, err = e.Submit(ctx, Command{Type: CmdCancel, Symbol: sym, OrderID: restingID, UserID: 1})
+	if err != nil || evs[0].Type != EvtOrderCancelled {
+		t.Fatalf("cancel during halt: %v %+v", err, evs)
+	}
+
+	// Resume restores order acceptance.
+	e.Resume(sym)
+	evs, err = e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "after", UserID: 2, Side: orderbook.Sell, Price: 100, Qty: 5})
+	if err != nil || evs[0].Type != EvtOrderAccepted {
+		t.Fatalf("after resume: %v %+v", err, evs)
+	}
+
+	// The blocked order must not appear in the journal (replay determinism).
+	var blockedSeen bool
+	j.Replay(func(_ uint64, cmd Command) error {
+		if cmd.OrderID == "blocked" {
+			blockedSeen = true
+		}
+		return nil
+	})
+	if blockedSeen {
+		t.Fatal("halted order leaked into the journal")
+	}
+}
+
 func TestDepthSnapshot(t *testing.T) {
 	e, stop := run(t, &MemJournal{}, nil)
 	defer stop()

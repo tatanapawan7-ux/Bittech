@@ -1,9 +1,11 @@
 package exchange
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -52,6 +54,9 @@ func NewServer(trading *Trading, eng *engine.Engine, led *ledger.Service, accoun
 	s.mux.HandleFunc("GET /v1/depth", s.handleDepth)
 	s.mux.HandleFunc("GET /v1/trades", s.handleTrades)
 	s.mux.HandleFunc("GET /v1/ws", s.handleWS)
+	s.mux.HandleFunc("GET /v1/admin/reconcile", s.adminOnly(s.handleReconcile))
+	s.mux.HandleFunc("POST /v1/admin/halt", s.adminOnly(s.handleHalt))
+	s.mux.HandleFunc("POST /v1/admin/resume", s.adminOnly(s.handleResume))
 	if faucet {
 		s.mux.HandleFunc("POST /v1/dev/deposit", s.authed(s.handleDevDeposit))
 	}
@@ -60,11 +65,21 @@ func NewServer(trading *Trading, eng *engine.Engine, led *ledger.Service, accoun
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) { s.mux.ServeHTTP(w, r) }
 
+// authed accepts either a session bearer token (browser clients) or an
+// HMAC-signed API key (programmatic clients). API-key requests send:
+//
+//	X-API-Key        the public key id
+//	X-API-Timestamp  unix millis, must be within the signature window
+//	X-API-Signature  hex HMAC-SHA256 over "<ts>\n<METHOD>\n<path>\n<body>"
 func (s *Server) authed(next func(http.ResponseWriter, *http.Request, *account.User)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if keyID := r.Header.Get("X-API-Key"); keyID != "" {
+			s.apiKeyAuth(w, r, keyID, next)
+			return
+		}
 		token, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if !ok || token == "" {
-			writeErr(w, http.StatusUnauthorized, "missing bearer token")
+			writeErr(w, http.StatusUnauthorized, "missing bearer token or API key")
 			return
 		}
 		u, err := s.accounts.Authenticate(r.Context(), token)
@@ -74,6 +89,30 @@ func (s *Server) authed(next func(http.ResponseWriter, *http.Request, *account.U
 		}
 		next(w, r, u)
 	}
+}
+
+func (s *Server) apiKeyAuth(w http.ResponseWriter, r *http.Request, keyID string, next func(http.ResponseWriter, *http.Request, *account.User)) {
+	ts, err := strconv.ParseInt(r.Header.Get("X-API-Timestamp"), 10, 64)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid X-API-Timestamp")
+		return
+	}
+	// Read and restore the body so the signature covers it and the handler can
+	// still decode it.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1<<16))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "body too large")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	u, err := s.accounts.VerifyAPIRequest(r.Context(), keyID,
+		r.Header.Get("X-API-Signature"), ts, r.Method, r.URL.Path, string(body))
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "invalid API signature")
+		return
+	}
+	next(w, r, u)
 }
 
 func (s *Server) handlePlaceOrder(w http.ResponseWriter, r *http.Request, u *account.User) {
@@ -124,6 +163,47 @@ func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request, u *accou
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"balances": balances})
+}
+
+// adminOnly authenticates (bearer or API key) and requires the admin role.
+func (s *Server) adminOnly(next func(http.ResponseWriter, *http.Request, *account.User)) http.HandlerFunc {
+	return s.authed(func(w http.ResponseWriter, r *http.Request, u *account.User) {
+		if !u.IsAdmin {
+			writeErr(w, http.StatusForbidden, "admin only")
+			return
+		}
+		next(w, r, u)
+	})
+}
+
+// handleReconcile runs the ledger invariant checks on demand (the reconciliation
+// job calls this / the same Service method on a schedule).
+func (s *Server) handleReconcile(w http.ResponseWriter, r *http.Request, _ *account.User) {
+	if err := s.ledger.CheckInvariants(r.Context()); err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": false, "violation": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleHalt(w http.ResponseWriter, r *http.Request, _ *account.User) {
+	var req struct{ Symbol string }
+	if !decode(w, r, &req) {
+		return
+	}
+	s.eng.Halt(req.Symbol)
+	s.log.Warn("trading halted", "symbol", req.Symbol)
+	writeJSON(w, http.StatusOK, map[string]any{"symbol": req.Symbol, "halted": true})
+}
+
+func (s *Server) handleResume(w http.ResponseWriter, r *http.Request, _ *account.User) {
+	var req struct{ Symbol string }
+	if !decode(w, r, &req) {
+		return
+	}
+	s.eng.Resume(req.Symbol)
+	s.log.Warn("trading resumed", "symbol", req.Symbol)
+	writeJSON(w, http.StatusOK, map[string]any{"symbol": req.Symbol, "halted": false})
 }
 
 func (s *Server) handleDepth(w http.ResponseWriter, r *http.Request) {

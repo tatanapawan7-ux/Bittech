@@ -98,14 +98,14 @@ func (p *PGStore) DeleteSession(ctx context.Context, tokenHash string) error {
 
 func (p *PGStore) CreateAPIKey(ctx context.Context, k APIKey) error {
 	_, err := p.pool.Exec(ctx,
-		`INSERT INTO api_keys (key_id, user_id, secret_hash, label) VALUES ($1, $2, $3, $4)`,
-		k.KeyID, k.UserID, k.SecretHash, k.Label)
+		`INSERT INTO api_keys (key_id, user_id, secret_hash, secret_enc, label) VALUES ($1, $2, $3, $4, $5)`,
+		k.KeyID, k.UserID, k.SecretHash, k.SecretEnc, k.Label)
 	return err
 }
 
 func (p *PGStore) APIKeysByUser(ctx context.Context, userID int64) ([]APIKey, error) {
 	rows, err := p.pool.Query(ctx,
-		`SELECT key_id, user_id, secret_hash, label, disabled FROM api_keys WHERE user_id = $1`,
+		`SELECT key_id, user_id, secret_hash, secret_enc, label, disabled FROM api_keys WHERE user_id = $1`,
 		userID)
 	if err != nil {
 		return nil, err
@@ -114,10 +114,24 @@ func (p *PGStore) APIKeysByUser(ctx context.Context, userID int64) ([]APIKey, er
 	var out []APIKey
 	for rows.Next() {
 		var k APIKey
-		if err := rows.Scan(&k.KeyID, &k.UserID, &k.SecretHash, &k.Label, &k.Disabled); err != nil {
+		if err := rows.Scan(&k.KeyID, &k.UserID, &k.SecretHash, &k.SecretEnc, &k.Label, &k.Disabled); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
 	}
 	return out, rows.Err()
+}
+
+func (p *PGStore) APIKeyByID(ctx context.Context, keyID string) (*APIKey, error) {
+	var k APIKey
+	err := p.pool.QueryRow(ctx,
+		`SELECT key_id, user_id, secret_hash, secret_enc, label, disabled FROM api_keys WHERE key_id = $1`,
+		keyID).Scan(&k.KeyID, &k.UserID, &k.SecretHash, &k.SecretEnc, &k.Label, &k.Disabled)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &k, nil
 }

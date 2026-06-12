@@ -45,6 +45,8 @@ services/ledger-service/ledger     double-entry postings, locking, trade settlem
 services/wallet-service            deposits, withdrawals (2FA+allowlist+limits), custody seam
 services/exchange                  trading API: orders, balances, depth, trades, WS feed
 services/exchange/cmd/exchange     single-binary backend (accounts+ledger+engine+API)
+libs/ratelimit                     token-bucket rate limiter (Redis + in-memory)
+libs/httpx                         edge middleware: Prometheus metrics + rate limiting
 infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
 ```
@@ -90,4 +92,6 @@ curl ':8080/v1/depth?symbol=BTC-USDT'
       withdrawal flow (2FA + allowlist + limit + operator approval) behind a Custody
       interface (mock provider; swap in Fireblocks/BitGo by implementing one interface)
 - [ ] Phase 6 — Trading frontend (Next.js + TradingView)
-- [ ] Phase 7 — Admin, observability, security & compliance hardening
+- [x] Phase 7 — Hardening: token-bucket rate limiting (Redis), Prometheus /metrics,
+      HMAC API-key auth (encrypted-at-rest secrets), admin reconcile + trading halt/resume.
+      Remaining for production: external security audit, KMS for keys, compliance go-live

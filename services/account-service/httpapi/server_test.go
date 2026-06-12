@@ -10,10 +10,15 @@ import (
 	"testing"
 
 	"github.com/tatanapawan7-ux/bittech/services/account-service/account"
+	"github.com/tatanapawan7-ux/bittech/services/account-service/auth"
 )
 
 func newTestServer() *httptest.Server {
-	svc := account.NewService(account.NewMemStore())
+	c, err := auth.NewCipher(make([]byte, 32))
+	if err != nil {
+		panic(err)
+	}
+	svc := account.NewService(account.NewMemStore()).WithCipher(c)
 	return httptest.NewServer(New(svc, slog.New(slog.NewTextHandler(io.Discard, nil))))
 }
 

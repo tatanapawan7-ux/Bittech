@@ -10,7 +10,11 @@ import (
 )
 
 func newTestService() *Service {
-	return NewService(NewMemStore())
+	c, err := auth.NewCipher(make([]byte, 32))
+	if err != nil {
+		panic(err)
+	}
+	return NewService(NewMemStore()).WithCipher(c)
 }
 
 func TestSignupAndLogin(t *testing.T) {
@@ -128,11 +132,32 @@ func TestAPIKeyLifecycle(t *testing.T) {
 	if len(keys) != 1 || keys[0].KeyID != keyID {
 		t.Fatalf("key not persisted: %+v", keys)
 	}
-	// Only the hash is stored — and it matches the returned secret.
+	// The hash matches the returned secret, and the secret is not stored raw.
 	if keys[0].SecretHash != auth.HashSecret(secret) {
 		t.Fatal("stored hash does not match secret")
 	}
-	if keys[0].SecretHash == secret {
+	if keys[0].SecretHash == secret || keys[0].SecretEnc == secret {
 		t.Fatal("secret stored in plaintext")
+	}
+
+	// A request signed with the secret verifies and resolves to the user.
+	now := time.Now()
+	sig := auth.SignRequest(secret, now, "POST", "/v1/orders", `{"x":1}`)
+	got, err := svc.VerifyAPIRequest(ctx, keyID, sig, now.UnixMilli(), "POST", "/v1/orders", `{"x":1}`)
+	if err != nil || got.ID != u.ID {
+		t.Fatalf("VerifyAPIRequest: %v user=%+v", err, got)
+	}
+	// A tampered body fails verification.
+	if _, err := svc.VerifyAPIRequest(ctx, keyID, sig, now.UnixMilli(), "POST", "/v1/orders", `{"x":2}`); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("expected ErrInvalidCredentials for tampered body, got %v", err)
+	}
+}
+
+func TestAPIKeysDisabledWithoutCipher(t *testing.T) {
+	ctx := context.Background()
+	svc := NewService(NewMemStore()) // no cipher
+	svc.Signup(ctx, "a@b.com", "averysecurepw")
+	if _, _, err := svc.CreateAPIKey(ctx, 1, "bot"); !errors.Is(err, ErrAPIKeysDisabled) {
+		t.Fatalf("expected ErrAPIKeysDisabled, got %v", err)
 	}
 }
