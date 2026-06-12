@@ -1,10 +1,13 @@
-# Local development dependencies for the exchange.
-# Brings up the three backing services the MVP relies on:
-#   - PostgreSQL   : accounts, orders, the double-entry ledger (ACID, source of truth)
-#   - Redis        : sessions, caching, rate limiting, ephemeral order-book snapshots
-#   - Redpanda     : Kafka-compatible ordered event log for the sequencer + replay
+# Full local stack for the exchange.
+#   - postgres : accounts, the double-entry ledger (ACID, source of truth)
+#   - redis    : sessions, rate limiting
+#   - redpanda : Kafka-compatible event log (reserved for the engine's future
+#                clustered journal; the MVP uses a file journal)
+#   - exchange : the Go backend (accounts + ledger + engine + trading API)
+#   - web      : the Next.js trading UI
 #
-# Usage:  docker compose -f infra/docker-compose.yml up -d
+# Backing services only:  docker compose -f infra/docker-compose.yml up -d postgres redis
+# Whole stack:            docker compose -f infra/docker-compose.yml up --build
 services:
   postgres:
     image: postgres:16
@@ -47,5 +50,43 @@ services:
     ports:
       - "9092:9092"
 
+  exchange:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile
+    environment:
+      DATABASE_URL: postgres://bittech:bittech@postgres:5432/bittech
+      REDIS_ADDR: redis:6379
+      JOURNAL_DIR: /data
+      DEV_FAUCET: "1"
+      # Dev-only signing key; generate a fresh 32-byte hex key for real deploys.
+      APIKEY_ENC_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      # Allow the browser UI (served on :3000) to open the market WebSocket.
+      ALLOWED_WS_ORIGINS: "localhost:3000"
+    volumes:
+      - exchange-data:/data
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/web.Dockerfile
+    environment:
+      # REST is proxied server-side to the backend container; the browser opens
+      # the WebSocket directly against the host-published backend port.
+      API_BASE: http://exchange:8080
+      NEXT_PUBLIC_WS_BASE: ws://localhost:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      - exchange
+
 volumes:
   pgdata:
+  exchange-data:
