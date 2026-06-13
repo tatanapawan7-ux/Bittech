@@ -186,6 +186,53 @@ func (s *Service) RequestWithdrawal(ctx context.Context, userID int64, asset, ad
 	return w, nil
 }
 
+// AllowlistEntry is one approved withdrawal destination.
+type AllowlistEntry struct {
+	Asset   string `json:"asset"`
+	Address string `json:"address"`
+	Label   string `json:"label"`
+}
+
+// Allowlist returns a user's approved withdrawal destinations.
+func (s *Service) Allowlist(ctx context.Context, userID int64) ([]AllowlistEntry, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT asset, address, label FROM withdrawal_allowlist WHERE user_id = $1 ORDER BY asset, address`,
+		userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []AllowlistEntry{}
+	for rows.Next() {
+		var e AllowlistEntry
+		if err := rows.Scan(&e.Asset, &e.Address, &e.Label); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+// UserWithdrawals returns a user's withdrawal history, newest first.
+func (s *Service) UserWithdrawals(ctx context.Context, userID int64) ([]Withdrawal, error) {
+	rows, err := s.pool.Query(ctx,
+		`SELECT id, user_id, asset, amount, address, status, tx_hash FROM withdrawals
+		 WHERE user_id = $1 ORDER BY id DESC`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Withdrawal{}
+	for rows.Next() {
+		var w Withdrawal
+		if err := rows.Scan(&w.ID, &w.UserID, &w.Asset, &w.Amount, &w.Address, &w.Status, &w.TxHash); err != nil {
+			return nil, err
+		}
+		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
 // PendingWithdrawals lists withdrawals awaiting a decision (operator view).
 func (s *Service) PendingWithdrawals(ctx context.Context) ([]Withdrawal, error) {
 	rows, err := s.pool.Query(ctx,

@@ -51,8 +51,10 @@ type Server struct {
 func New(w *wallet.Service, auth Authorizer, log *slog.Logger, webhookSecret string) *Server {
 	s := &Server{wallet: w, auth: auth, mux: http.NewServeMux(), log: log, webhookSecret: webhookSecret}
 	s.mux.HandleFunc("GET /v1/wallet/address", s.authed(s.handleAddress))
+	s.mux.HandleFunc("GET /v1/wallet/allowlist", s.authed(s.handleListAllowlist))
 	s.mux.HandleFunc("POST /v1/wallet/allowlist", s.authed(s.handleAllowlist))
 	s.mux.HandleFunc("POST /v1/wallet/withdraw", s.authed(s.handleWithdraw))
+	s.mux.HandleFunc("GET /v1/wallet/withdrawals", s.authed(s.handleUserWithdrawals))
 	s.mux.HandleFunc("GET /v1/admin/withdrawals", s.adminOnly(s.handlePending))
 	s.mux.HandleFunc("POST /v1/admin/withdrawals/approve", s.adminOnly(s.handleApprove))
 	s.mux.HandleFunc("POST /v1/admin/withdrawals/reject", s.adminOnly(s.handleReject))
@@ -112,7 +114,12 @@ func (s *Server) handleAddress(w http.ResponseWriter, r *http.Request, u *accoun
 }
 
 func (s *Server) handleAllowlist(w http.ResponseWriter, r *http.Request, u *account.User) {
-	var req struct{ Asset, Address, Label, TOTPCode string }
+	var req struct {
+		Asset    string `json:"asset"`
+		Address  string `json:"address"`
+		Label    string `json:"label"`
+		TOTPCode string `json:"totp_code"`
+	}
 	if !decode(w, r, &req) {
 		return
 	}
@@ -125,6 +132,24 @@ func (s *Server) handleAllowlist(w http.ResponseWriter, r *http.Request, u *acco
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleListAllowlist(w http.ResponseWriter, r *http.Request, u *account.User) {
+	entries, err := s.wallet.Allowlist(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"allowlist": entries})
+}
+
+func (s *Server) handleUserWithdrawals(w http.ResponseWriter, r *http.Request, u *account.User) {
+	list, err := s.wallet.UserWithdrawals(r.Context(), u.ID)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"withdrawals": list})
 }
 
 func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request, u *account.User) {

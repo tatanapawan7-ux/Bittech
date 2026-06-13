@@ -138,6 +138,18 @@ func (ob *OrderBook) BestBid() (int64, bool) { return ob.bids.best() }
 // BestAsk returns the lowest ask price and true, or false if there are no asks.
 func (ob *OrderBook) BestAsk() (int64, bool) { return ob.asks.best() }
 
+// Order returns a copy of a resting order by id, or false if it is not on the
+// book (never placed, fully filled, or cancelled).
+func (ob *OrderBook) Order(id string) (Order, bool) {
+	o, ok := ob.live[id]
+	if !ok {
+		return Order{}, false
+	}
+	cp := *o
+	cp.elem, cp.side = nil, nil
+	return cp, true
+}
+
 // match crosses the incoming order against the opposite side, emitting trades.
 func (ob *OrderBook) match(o *Order) []Trade {
 	opp := ob.asks

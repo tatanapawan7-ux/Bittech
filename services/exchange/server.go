@@ -56,8 +56,10 @@ func NewServer(trading *Trading, eng *engine.Engine, led *ledger.Service, accoun
 		s.wsOrigins = strings.Split(v, ",")
 	}
 	s.mux.HandleFunc("POST /v1/orders", s.authed(s.handlePlaceOrder))
+	s.mux.HandleFunc("GET /v1/orders", s.authed(s.handleOpenOrders))
 	s.mux.HandleFunc("POST /v1/orders/cancel", s.authed(s.handleCancelOrder))
 	s.mux.HandleFunc("GET /v1/balances", s.authed(s.handleBalances))
+	s.mux.HandleFunc("GET /v1/symbols", s.handleSymbols)
 	s.mux.HandleFunc("GET /v1/depth", s.handleDepth)
 	s.mux.HandleFunc("GET /v1/trades", s.handleTrades)
 	s.mux.HandleFunc("GET /v1/ws", s.handleWS)
@@ -160,6 +162,23 @@ func (s *Server) handleCancelOrder(w http.ResponseWriter, r *http.Request, u *ac
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"events": events})
+}
+
+func (s *Server) handleOpenOrders(w http.ResponseWriter, r *http.Request, u *account.User) {
+	writeJSON(w, http.StatusOK, map[string]any{"orders": s.eng.OpenOrders(u.ID)})
+}
+
+// handleSymbols lists tradable markets and whether each is currently halted.
+func (s *Server) handleSymbols(w http.ResponseWriter, _ *http.Request) {
+	type market struct {
+		Symbol string `json:"symbol"`
+		Halted bool   `json:"halted"`
+	}
+	markets := []market{}
+	for _, sym := range s.eng.Symbols() {
+		markets = append(markets, market{Symbol: sym, Halted: s.eng.IsHalted(sym)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"markets": markets})
 }
 
 func (s *Server) handleBalances(w http.ResponseWriter, r *http.Request, u *account.User) {

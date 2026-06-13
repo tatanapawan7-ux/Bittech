@@ -36,6 +36,7 @@ func New(svc *account.Service, log *slog.Logger) *Server {
 	s.mux.HandleFunc("POST /v1/2fa/setup", s.authed(s.handle2FASetup))
 	s.mux.HandleFunc("POST /v1/2fa/confirm", s.authed(s.handle2FAConfirm))
 	s.mux.HandleFunc("POST /v1/apikeys", s.authed(s.handleCreateAPIKey))
+	s.mux.HandleFunc("GET /v1/apikeys", s.authed(s.handleListAPIKeys))
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -93,7 +94,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleMe(w http.ResponseWriter, _ *http.Request, u *account.User) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"user_id": u.ID, "email": u.Email, "totp_enabled": u.TOTPEnabled,
+		"user_id": u.ID, "email": u.Email, "totp_enabled": u.TOTPEnabled, "is_admin": u.IsAdmin,
 	})
 }
 
@@ -129,6 +130,15 @@ func (s *Server) handleCreateAPIKey(w http.ResponseWriter, r *http.Request, u *a
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"key_id": keyID, "secret": secret})
+}
+
+func (s *Server) handleListAPIKeys(w http.ResponseWriter, r *http.Request, u *account.User) {
+	keys, err := s.svc.ListAPIKeys(r.Context(), u.ID)
+	if err != nil {
+		s.writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"keys": keys})
 }
 
 // writeServiceErr maps service errors to HTTP statuses without leaking internals.

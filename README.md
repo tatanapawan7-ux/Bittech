@@ -47,7 +47,7 @@ services/exchange                  trading API: orders, balances, depth, trades,
 services/exchange/cmd/exchange     single-binary backend (accounts+ledger+engine+API)
 libs/ratelimit                     token-bucket rate limiter (Redis + in-memory)
 libs/httpx                         edge middleware: Prometheus metrics + rate limiting
-web                                Next.js trading UI (order book, chart, order form, WS)
+web                                Next.js app: trade, wallet, account/2FA, admin (over REST/WS)
 docs/openapi.yaml                  OpenAPI 3.0 spec for the public REST API
 infra/db                           SQL migrations (double-entry ledger, auth)
 infra/docker-compose.yml           Postgres + Redis + Redpanda for local dev
@@ -106,8 +106,10 @@ API_BASE=http://localhost:8080 npm run dev   # http://localhost:3000
 - [x] Phase 5 — Wallet/custody: deposit addresses, confirmation-gated crediting,
       withdrawal flow (2FA + allowlist + limit + operator approval) behind a Custody
       interface (mock provider; swap in Fireblocks/BitGo by implementing one interface)
-- [x] Phase 6 — Trading frontend: Next.js trading UI (live order book, candlestick chart,
-      order entry, balances + faucet, auth) over the REST/WebSocket API
+- [x] Phase 6 — Web app: multi-page Next.js UI — Trade (live order book + click-to-fill,
+      candlestick chart, order entry, open orders w/ cancel, balances + faucet), Wallet
+      (deposit address, allowlist, 2FA withdrawals, history), Account (2FA enrollment w/ QR,
+      API keys), and an Admin console (withdrawal queue, halt/resume, reconcile)
 - [x] Phase 7 — Hardening: token-bucket rate limiting (Redis), Prometheus /metrics,
       HMAC API-key auth (encrypted-at-rest secrets), admin reconcile + trading halt/resume.
       Remaining for production: external security audit, KMS for keys, compliance go-live

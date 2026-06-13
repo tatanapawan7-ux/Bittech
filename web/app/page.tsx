@@ -1,132 +1,137 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  api,
-  subscribe,
-  getToken,
-  Depth,
-  EngineEvent,
-  Balance,
-} from "@/lib/api";
+import { api, subscribe, Depth, EngineEvent, Balance, OpenOrder, Market } from "@/lib/api";
+import { useAuth } from "@/components/AuthProvider";
 import { OrderBook } from "@/components/OrderBook";
 import { Trades } from "@/components/Trades";
 import { OrderForm } from "@/components/OrderForm";
 import { Balances } from "@/components/Balances";
+import { OpenOrders } from "@/components/OpenOrders";
 import { Chart } from "@/components/Chart";
-import { AuthBar } from "@/components/AuthBar";
+import { fmt } from "@/components/ui";
 
-const SYMBOLS = (process.env.NEXT_PUBLIC_SYMBOLS || "BTC-USDT,ETH-USDT").split(",");
+const FALLBACK = (process.env.NEXT_PUBLIC_SYMBOLS || "BTC-USDT,ETH-USDT")
+  .split(",")
+  .map((s) => ({ symbol: s, halted: false }));
 
 export default function TradePage() {
-  const [symbol, setSymbol] = useState(SYMBOLS[0]);
+  const { user } = useAuth();
+  const loggedIn = !!user;
+
+  const [markets, setMarkets] = useState<Market[]>(FALLBACK);
+  const [symbol, setSymbol] = useState(FALLBACK[0].symbol);
   const [depth, setDepth] = useState<Depth | null>(null);
   const [trades, setTrades] = useState<EngineEvent[]>([]);
   const [balances, setBalances] = useState<Balance[]>([]);
-  const [email, setEmail] = useState<string | null>(null);
-  const loggedIn = email !== null;
+  const [orders, setOrders] = useState<OpenOrder[]>([]);
+  const [presetPrice, setPresetPrice] = useState<number | undefined>();
+
+  const market = markets.find((m) => m.symbol === symbol);
 
   const refreshDepth = useCallback(async () => {
     try {
       setDepth(await api.depth(symbol));
     } catch {
-      /* backend may be down; keep last snapshot */
+      /* keep last snapshot */
     }
   }, [symbol]);
 
-  const refreshBalances = useCallback(async () => {
-    if (!getToken()) return;
-    try {
-      setBalances((await api.balances()).balances || []);
-    } catch {
-      /* not logged in */
-    }
-  }, []);
-
-  const loadMe = useCallback(async () => {
-    if (!getToken()) {
-      setEmail(null);
+  const refreshPrivate = useCallback(async () => {
+    if (!user) {
+      setBalances([]);
+      setOrders([]);
       return;
     }
     try {
-      setEmail((await api.me()).email);
-      refreshBalances();
+      const [b, o] = await Promise.all([api.balances(), api.openOrders()]);
+      setBalances(b.balances || []);
+      setOrders(o.orders || []);
     } catch {
-      setEmail(null);
+      /* ignore */
     }
-  }, [refreshBalances]);
+  }, [user]);
 
-  // Initial load + whenever the symbol changes: snapshot depth and trades.
+  // Load markets once.
+  useEffect(() => {
+    api.symbols().then((m) => m.markets?.length && setMarkets(m.markets)).catch(() => {});
+  }, []);
+
+  // Snapshot on symbol change.
   useEffect(() => {
     refreshDepth();
     api.trades(symbol).then((t) => setTrades(t.trades || [])).catch(() => {});
   }, [symbol, refreshDepth]);
 
   useEffect(() => {
-    loadMe();
-  }, [loadMe]);
+    refreshPrivate();
+  }, [refreshPrivate, symbol]);
 
-  // Live feed: on any market event, append trades and refresh the book. We
-  // re-fetch the depth snapshot on events rather than apply deltas client-side
-  // for simplicity (the snapshot endpoint is cheap for an MVP).
+  // Live feed.
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     const close = subscribe(symbol, (events) => {
       const newTrades = events.filter((e) => e.type === "trade");
       if (newTrades.length) {
         setTrades((prev) => [...prev, ...newTrades].slice(-200));
-        refreshBalances();
       }
       if (debounceRef.current) clearTimeout(debounceRef.current);
-      debounceRef.current = setTimeout(refreshDepth, 80);
+      debounceRef.current = setTimeout(() => {
+        refreshDepth();
+        if (user) refreshPrivate();
+      }, 80);
     });
     return close;
-  }, [symbol, refreshDepth, refreshBalances]);
+  }, [symbol, refreshDepth, refreshPrivate, user]);
+
+  const lastPrice = trades.length ? trades[trades.length - 1].price : undefined;
 
   return (
-    <div className="min-h-screen">
-      <header className="flex items-center justify-between border-b border-line px-4 py-2">
-        <div className="flex items-center gap-4">
-          <span className="text-lg font-bold text-yellow-400">Bittech</span>
-          <select
-            value={symbol}
-            onChange={(e) => setSymbol(e.target.value)}
-            className="rounded bg-panel2 px-2 py-1 text-sm outline-none"
-          >
-            {SYMBOLS.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </div>
-        <AuthBar email={email} onAuthed={loadMe} onLogout={() => setEmail(null)} />
-      </header>
+    <div>
+      <div className="flex items-center gap-4 border-b border-line px-4 py-2">
+        <select
+          value={symbol}
+          onChange={(e) => setSymbol(e.target.value)}
+          className="rounded bg-panel2 px-2 py-1 text-sm outline-none"
+        >
+          {markets.map((m) => (
+            <option key={m.symbol} value={m.symbol}>
+              {m.symbol}
+            </option>
+          ))}
+        </select>
+        <span className="num text-lg font-semibold text-gray-100">{lastPrice ? fmt(lastPrice) : "—"}</span>
+        {market?.halted && (
+          <span className="rounded bg-down/20 px-2 py-0.5 text-xs text-down">Trading halted</span>
+        )}
+      </div>
 
-      <main className="grid grid-cols-1 gap-2 p-2 lg:grid-cols-[1fr_320px_300px]">
+      <div className="grid grid-cols-1 gap-2 p-2 lg:grid-cols-[1fr_320px_300px]">
         <section className="space-y-2">
           <div className="rounded border border-line bg-panel p-1">
             <Chart trades={trades} />
           </div>
-          <Balances balances={balances} loggedIn={loggedIn} onChange={refreshBalances} />
+          <OpenOrders orders={orders} loggedIn={loggedIn} onChange={refreshPrivate} />
+          <Balances balances={balances} loggedIn={loggedIn} onChange={refreshPrivate} />
         </section>
 
         <section className="space-y-2">
-          <OrderBook depth={depth} />
+          <OrderBook depth={depth} onPriceClick={setPresetPrice} />
         </section>
 
         <section className="space-y-2">
           <OrderForm
             symbol={symbol}
             loggedIn={loggedIn}
+            presetPrice={presetPrice}
             onPlaced={() => {
               refreshDepth();
-              refreshBalances();
+              refreshPrivate();
             }}
           />
           <Trades trades={trades} />
         </section>
-      </main>
+      </div>
     </div>
   );
 }

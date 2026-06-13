@@ -1,7 +1,7 @@
 "use client";
 
 import { EngineEvent } from "@/lib/api";
-import { Panel } from "./OrderBook";
+import { Panel, fmt } from "./ui";
 
 // Trades shows the live trade tape, newest first. Taker side colours the row:
 // side 0 = buy (up), 1 = sell (down).
@@ -18,10 +18,8 @@ export function Trades({ trades }: { trades: EngineEvent[] }) {
         {rows.length === 0 && <div className="px-3 py-2 text-gray-500">No trades yet</div>}
         {rows.map((t, i) => (
           <div key={i} className="grid grid-cols-3 px-3 py-[2px] num text-xs">
-            <span className={t.side === 1 ? "text-down" : "text-up"}>
-              {(t.price ?? 0).toLocaleString()}
-            </span>
-            <span className="text-right text-gray-300">{(t.qty ?? 0).toLocaleString()}</span>
+            <span className={t.side === 1 ? "text-down" : "text-up"}>{fmt(t.price)}</span>
+            <span className="text-right text-gray-300">{fmt(t.qty)}</span>
             <span className="text-right text-gray-600">{t.seq}</span>
           </div>
         ))}

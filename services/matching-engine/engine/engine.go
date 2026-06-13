@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/tatanapawan7-ux/bittech/services/matching-engine/orderbook"
@@ -94,13 +95,27 @@ type Sink func(events []Event)
 
 // Engine is the single-writer matching core for a set of symbols.
 type Engine struct {
-	books   map[string]*orderbook.OrderBook
-	orders  map[string]ownedOrder // live order id -> attribution
-	halted  map[string]bool       // symbols where new orders are paused
-	haltMu  sync.RWMutex          // guards halted (written by control plane)
+	books  map[string]*orderbook.OrderBook
+	orders map[string]ownedOrder // RESTING order id -> attribution
+	// booksMu guards books + orders. There is exactly one writer (apply, run
+	// from the engine loop) and many readers (Depth/OpenOrders from HTTP
+	// handlers), so a RWMutex is the right fit and keeps reads race-free.
+	booksMu sync.RWMutex
+	halted  map[string]bool // symbols where new orders are paused
+	haltMu  sync.RWMutex    // guards halted (written by control plane)
 	journal Journal
 	sink    Sink
 	cmdCh   chan submitReq
+}
+
+// OpenOrder is a resting order belonging to a user, for the open-orders view.
+type OpenOrder struct {
+	OrderID   string         `json:"order_id"`
+	Symbol    string         `json:"symbol"`
+	Side      orderbook.Side `json:"side"`
+	Price     int64          `json:"price"`
+	Quantity  int64          `json:"quantity"`
+	Remaining int64          `json:"remaining"`
 }
 
 type ownedOrder struct {
@@ -219,11 +234,11 @@ func (e *Engine) IsHalted(symbol string) bool {
 	return e.halted[symbol]
 }
 
-// Depth exposes an order-book snapshot for market data. It must only be called
-// from the engine goroutine's context in production; the dev HTTP server calls
-// it via Submit-free read access, which is safe only because the dev server
-// serializes externally. (Phase 4 replaces this with a read-model.)
+// Depth exposes an order-book snapshot for market data. Safe to call
+// concurrently with the engine loop (read-locked against apply).
 func (e *Engine) Depth(symbol string, levels int) (bids, asks []orderbook.PriceLevel, err error) {
+	e.booksMu.RLock()
+	defer e.booksMu.RUnlock()
 	ob, ok := e.books[symbol]
 	if !ok {
 		return nil, nil, ErrUnknownSymbol
@@ -232,10 +247,46 @@ func (e *Engine) Depth(symbol string, levels int) (bids, asks []orderbook.PriceL
 	return bids, asks, nil
 }
 
+// OpenOrders returns a user's resting orders across all symbols. Read-locked so
+// it is safe to call from HTTP handlers while the engine processes commands.
+func (e *Engine) OpenOrders(userID int64) []OpenOrder {
+	e.booksMu.RLock()
+	defer e.booksMu.RUnlock()
+	out := []OpenOrder{}
+	for id, owner := range e.orders {
+		if owner.userID != userID {
+			continue
+		}
+		ord, ok := e.books[owner.symbol].Order(id)
+		if !ok {
+			continue
+		}
+		out = append(out, OpenOrder{
+			OrderID: id, Symbol: owner.symbol, Side: owner.side,
+			Price: ord.Price, Quantity: ord.Quantity, Remaining: ord.Remaining,
+		})
+	}
+	return out
+}
+
+// Symbols returns the trading pairs this engine serves (set at construction).
+func (e *Engine) Symbols() []string {
+	out := make([]string, 0, len(e.books))
+	for s := range e.books {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
 // apply executes one command against the book, deterministically. It never
 // returns an error: invalid commands become OrderRejected events so that the
 // journal can always be replayed in full.
 func (e *Engine) apply(seq uint64, cmd Command) []Event {
+	// Single writer: serialize against concurrent Depth/OpenOrders readers.
+	e.booksMu.Lock()
+	defer e.booksMu.Unlock()
+
 	ob, ok := e.books[cmd.Symbol]
 	if !ok {
 		return []Event{e.reject(seq, cmd, ErrUnknownSymbol.Error())}
@@ -252,7 +303,6 @@ func (e *Engine) apply(seq uint64, cmd Command) []Event {
 		if err != nil {
 			return []Event{e.reject(seq, cmd, err.Error())}
 		}
-		e.orders[cmd.OrderID] = ownedOrder{userID: cmd.UserID, side: cmd.Side, symbol: cmd.Symbol}
 		events := []Event{{
 			Type: EvtOrderAccepted, Seq: seq, Index: 0, Symbol: cmd.Symbol,
 			OrderID: cmd.OrderID, UserID: cmd.UserID, Side: cmd.Side,
@@ -267,6 +317,16 @@ func (e *Engine) apply(seq uint64, cmd Command) []Event {
 				MakerOrderID: tr.MakerOrderID, TakerOrderID: tr.TakerOrderID,
 				MakerUserID: maker.userID, TakerUserID: cmd.UserID,
 			})
+			// A maker that was fully consumed is no longer resting; drop it so
+			// `orders` stays exactly the set of live resting orders.
+			if _, stillResting := ob.Order(tr.MakerOrderID); !stillResting {
+				delete(e.orders, tr.MakerOrderID)
+			}
+		}
+		// Record the taker only if it actually rested (a limit order with an
+		// unfilled remainder). Fully-filled and market orders never rest.
+		if _, resting := ob.Order(cmd.OrderID); resting {
+			e.orders[cmd.OrderID] = ownedOrder{userID: cmd.UserID, side: cmd.Side, symbol: cmd.Symbol}
 		}
 		return events
 

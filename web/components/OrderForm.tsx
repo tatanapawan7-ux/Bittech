@@ -1,29 +1,38 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Panel } from "./OrderBook";
+import { Panel, useToast } from "./ui";
 
-// OrderForm places limit/market orders. On success it calls onPlaced so the
-// parent can refresh balances and depth.
+// OrderForm places limit/market orders. `presetPrice` lets the order book push
+// a clicked price in; onPlaced refreshes the parent after a successful order.
 export function OrderForm({
   symbol,
   loggedIn,
+  presetPrice,
   onPlaced,
 }: {
   symbol: string;
   loggedIn: boolean;
+  presetPrice?: number;
   onPlaced: () => void;
 }) {
   const [side, setSide] = useState<"buy" | "sell">("buy");
   const [type, setType] = useState<"limit" | "market">("limit");
   const [price, setPrice] = useState("");
   const [qty, setQty] = useState("");
-  const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const { push } = useToast();
+
+  // When the user clicks a price in the order book, fill it here.
+  useEffect(() => {
+    if (presetPrice && presetPrice > 0) setPrice(String(presetPrice));
+  }, [presetPrice]);
+
+  const [base, quote] = symbol.split("-");
+  const total = type === "limit" && price && qty ? Number(price) * Number(qty) : 0;
 
   async function submit() {
-    setMsg(null);
     setBusy(true);
     try {
       const res = await api.placeOrder(
@@ -34,17 +43,15 @@ export function OrderForm({
         Number(qty)
       );
       const filled = res.events.filter((e) => e.type === "trade").length;
-      setMsg(filled ? `Filled in ${filled} trade(s)` : "Order resting on book");
+      push(filled ? `Filled in ${filled} trade(s)` : "Order resting on book");
       setQty("");
       onPlaced();
     } catch (e) {
-      setMsg((e as Error).message);
+      push((e as Error).message, "err");
     } finally {
       setBusy(false);
     }
   }
-
-  const [base, quote] = symbol.split("-");
 
   return (
     <Panel title="Place Order">
@@ -57,7 +64,7 @@ export function OrderForm({
             Sell {base}
           </Tab>
         </div>
-        <div className="flex gap-2 text-xs">
+        <div className="flex gap-3 text-xs">
           {(["limit", "market"] as const).map((t) => (
             <button
               key={t}
@@ -68,10 +75,16 @@ export function OrderForm({
             </button>
           ))}
         </div>
-        {type === "limit" && (
-          <Field label={`Price (${quote})`} value={price} onChange={setPrice} />
+        {type === "limit" && <Input label={`Price (${quote})`} value={price} onChange={setPrice} />}
+        <Input label={`Amount (${base})`} value={qty} onChange={setQty} />
+        {total > 0 && (
+          <div className="num text-xs text-gray-500">
+            Total ≈ {total.toLocaleString()} {quote}
+          </div>
         )}
-        <Field label={`Amount (${base})`} value={qty} onChange={setQty} />
+        {type === "market" && side === "buy" && (
+          <div className="text-xs text-down">Market buys aren&apos;t supported yet — use a limit order.</div>
+        )}
         <button
           disabled={busy || !loggedIn}
           onClick={submit}
@@ -81,7 +94,6 @@ export function OrderForm({
         >
           {loggedIn ? `${side === "buy" ? "Buy" : "Sell"} ${base}` : "Log in to trade"}
         </button>
-        {msg && <div className="text-xs text-gray-400">{msg}</div>}
       </div>
     </Panel>
   );
@@ -114,7 +126,7 @@ function Tab({
   );
 }
 
-function Field({
+function Input({
   label,
   value,
   onChange,

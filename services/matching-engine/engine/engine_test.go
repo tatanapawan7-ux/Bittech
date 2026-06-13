@@ -235,6 +235,50 @@ func TestHaltBlocksNewOrdersButAllowsCancels(t *testing.T) {
 	}
 }
 
+func TestOpenOrdersTracksRestingOnly(t *testing.T) {
+	e, stop := run(t, &MemJournal{}, nil)
+	defer stop()
+	ctx := context.Background()
+
+	// User 1 rests two bids; user 2 rests one ask.
+	e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "b1", UserID: 1, Side: orderbook.Buy, Price: 99, Qty: 5})
+	e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "b2", UserID: 1, Side: orderbook.Buy, Price: 98, Qty: 3})
+	e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "a1", UserID: 2, Side: orderbook.Sell, Price: 101, Qty: 4})
+
+	if got := e.OpenOrders(1); len(got) != 2 {
+		t.Fatalf("user 1 open orders = %d, want 2", len(got))
+	}
+	if got := e.OpenOrders(2); len(got) != 1 {
+		t.Fatalf("user 2 open orders = %d, want 1", len(got))
+	}
+
+	// A fully-filled order must not appear; a partial fill must show the remainder.
+	// User 2 sells 5 into user 1's 99-bid (5): b1 fully fills, a (taker) market-ish
+	// limit at 99 fully fills too -> neither rests.
+	e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "s1", UserID: 2, Side: orderbook.Sell, Price: 99, Qty: 5})
+	o1 := e.OpenOrders(1)
+	if len(o1) != 1 || o1[0].OrderID != "b2" {
+		t.Fatalf("after fill, user 1 should have only b2 resting: %+v", o1)
+	}
+	// s1 fully filled -> seller (user 2) still just has a1 resting.
+	if got := e.OpenOrders(2); len(got) != 1 || got[0].OrderID != "a1" {
+		t.Fatalf("user 2 should have only a1 resting: %+v", got)
+	}
+
+	// Partial: user 1 bids 10 @ 101, lifts the 4-ask, 6 rests.
+	e.Submit(ctx, Command{Type: CmdPlaceLimit, Symbol: sym, OrderID: "b3", UserID: 1, Side: orderbook.Buy, Price: 101, Qty: 10})
+	for _, oo := range e.OpenOrders(1) {
+		if oo.OrderID == "b3" {
+			if oo.Remaining != 6 || oo.Quantity != 10 {
+				t.Fatalf("b3 remainder wrong: %+v", oo)
+			}
+		}
+	}
+	if got := e.Symbols(); len(got) != 1 || got[0] != sym {
+		t.Fatalf("Symbols = %v", got)
+	}
+}
+
 func TestDepthSnapshot(t *testing.T) {
 	e, stop := run(t, &MemJournal{}, nil)
 	defer stop()

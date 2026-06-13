@@ -232,6 +232,26 @@ func (s *Service) CreateAPIKey(ctx context.Context, userID int64, label string) 
 	return keyID, secret, nil
 }
 
+// APIKeyInfo is the non-secret view of an API key, for listing.
+type APIKeyInfo struct {
+	KeyID    string `json:"key_id"`
+	Label    string `json:"label"`
+	Disabled bool   `json:"disabled"`
+}
+
+// ListAPIKeys returns a user's API keys without any secret material.
+func (s *Service) ListAPIKeys(ctx context.Context, userID int64) ([]APIKeyInfo, error) {
+	keys, err := s.store.APIKeysByUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]APIKeyInfo, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, APIKeyInfo{KeyID: k.KeyID, Label: k.Label, Disabled: k.Disabled})
+	}
+	return out, nil
+}
+
 // VerifyAPIRequest authenticates a signed programmatic request: it looks up the
 // key, decrypts its secret, and checks the HMAC signature and freshness window.
 // On success it returns the owning user (Binance-style API authentication).
