@@ -4,8 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/coder/websocket"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tatanapawan7-ux/bittech/libs/ratelimit"
 )
@@ -83,6 +86,37 @@ func testCounterValue(t *testing.T, reg *prometheus.Registry, name string) float
 		}
 	}
 	return 0
+}
+
+// TestInstrumentAllowsWebSocketUpgrade guards the bug where the metrics
+// wrapper's ResponseWriter didn't implement http.Hijacker, so websocket.Accept
+// failed (501) when the handler was wrapped — breaking the live market feed.
+func TestInstrumentAllowsWebSocketUpgrade(t *testing.T) {
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg)
+	ws := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		c.Write(r.Context(), websocket.MessageText, []byte("hi"))
+		c.Close(websocket.StatusNormalClosure, "")
+	})
+	ts := httptest.NewServer(m.Instrument(ws))
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	url := "ws" + strings.TrimPrefix(ts.URL, "http")
+	c, _, err := websocket.Dial(ctx, url, nil)
+	if err != nil {
+		t.Fatalf("websocket dial through middleware failed: %v", err)
+	}
+	defer c.CloseNow()
+	_, data, err := c.Read(ctx)
+	if err != nil || string(data) != "hi" {
+		t.Fatalf("read: %q %v", data, err)
+	}
 }
 
 func TestClientIP(t *testing.T) {

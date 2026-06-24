@@ -19,6 +19,9 @@ export function Chart({ trades }: { trades: EngineEvent[] }) {
       grid: { vertLines: { color: "#2b3139" }, horzLines: { color: "#2b3139" } },
       timeScale: { timeVisible: true, secondsVisible: false, borderColor: "#2b3139" },
       rightPriceScale: { borderColor: "#2b3139" },
+      // Pin the locale so formatting never depends on the host's (which can be
+      // an invalid Intl tag like "en-US@posix" and would crash the chart).
+      localization: { locale: "en-US" },
       height: 320,
       autoSize: true,
     });
@@ -40,7 +43,7 @@ export function Chart({ trades }: { trades: EngineEvent[] }) {
     seriesRef.current.setData(candles);
   }, [trades]);
 
-  return <div ref={ref} className="w-full" />;
+  return <div ref={ref} className="h-[320px] w-full" />;
 }
 
 type Candle = {

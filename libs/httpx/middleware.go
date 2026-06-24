@@ -4,6 +4,8 @@
 package httpx
 
 import (
+	"bufio"
+	"fmt"
 	"net"
 	"net/http"
 	"strconv"
@@ -50,6 +52,25 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(code int) {
 	r.status = code
 	r.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack lets WebSocket upgrades work through this middleware by delegating to
+// the underlying ResponseWriter. Without it, wrapping breaks the hijack that
+// websocket.Accept needs (it returns 501).
+func (r *statusRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := r.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("httpx: underlying ResponseWriter is not a http.Hijacker")
+	}
+	return h.Hijack()
+}
+
+// Flush delegates to the underlying ResponseWriter when it supports flushing
+// (streaming responses).
+func (r *statusRecorder) Flush() {
+	if f, ok := r.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // Instrument wraps a handler to record request count and latency. The route
